@@ -25,7 +25,7 @@ from config import (
     ADMIN_CONTACT,
     BRANDING_FOOTER,
     CHANNEL_LINK_1,
-    GROUP_LINK_2,
+    CHANNEL_LINK_2,
     MIN_DIAMOND_PURCHASE,
     OWNER_ID,
     REFERRAL_REWARD_DIAMOND,
@@ -96,7 +96,7 @@ def footer_buttons(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK_1),
-            InlineKeyboardButton("🆘 Support", url=GROUP_LINK_2),
+            InlineKeyboardButton("🆘 Support", url=CHANNEL_LINK_2),
         ],
     ]
     if add_to_group_url:
@@ -209,27 +209,34 @@ async def enforce_membership(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     if not user:
         return False
+
+    missing_channels = []
+
     for channel in REQUIRED_CHANNELS:
         try:
             member = await context.bot.get_chat_member(channel["id"], user.id)
             if member.status in ["left", "kicked"]:
-                raise ValueError("not joined")
-        except Exception:
-            keyboard = [
-                [InlineKeyboardButton("Join Updates", url=CHANNEL_LINK_1)],
-                [InlineKeyboardButton("Join Support", url=GROUP_LINK_2)],
-                [InlineKeyboardButton("Verify Membership", callback_data=f"verify_membership_{user.id}")],
-            ]
-            await safe_send(
-                update,
-                context,
-                "Access restricted. Join both channels first, then tap Verify.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                autodelete=False,
-            )
-            return False
-    return True
+                missing_channels.append(channel)
+        except Exception as e:
+            logger.warning(f"Membership check failed for {user.id} in {channel['id']}: {e}")
+            missing_channels.append(channel)
 
+    if missing_channels:
+        keyboard = [
+            [InlineKeyboardButton("Join Updates", url=CHANNEL_LINK_1)],
+            [InlineKeyboardButton("Join Support", url=CHANNEL_LINK_2)],
+            [InlineKeyboardButton("Verify Membership", callback_data=f"verify_membership_{user.id}")],
+        ]
+        await safe_send(
+            update,
+            context,
+            "Access restricted. Join both channels first, then tap Verify.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            autodelete=False,
+        )
+        return False
+
+    return True
 
 # Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -936,28 +943,59 @@ async def ifsc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Direct input handler
 async def handle_direct_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle messages that are not commands. Auto-detects:
+    - Indian numbers (+91 or 10-digit)
+    - Pakistan numbers (+92 or 12-digit starting with 92)
+    - UPI IDs
+    - IP addresses
+    - 12-digit Aadhar numbers
+    """
     if not getattr(update, "message", None) or not update.message.text:
         return
+
     text = update.message.text.strip()
     chat_type = update.effective_chat.type if update.effective_chat else "private"
+
+    # If message comes from a group, only process if bot is mentioned
     if chat_type != "private":
         bot_username = (await context.bot.get_me()).username
         if f"@{bot_username}" not in text and not text.startswith("/"):
             return
         text = text.replace(f"@{bot_username}", "").strip()
-    if text.startswith("/"):
+
+    # Clean input
+    clean_text = text.replace(" ", "").replace("-", "")
+
+    # Skip commands
+    if clean_text.startswith("/"):
         return
-    if "@" in text and len(text.split("@")) == 2:
-        return await handle_lookup(update, context, "upi", text)
-    if text.startswith("+92") or (text.isdigit() and len(text) == 12 and text.startswith("92")):
-        return await handle_lookup(update, context, "pakistan", text)
-    if text.startswith("+91") or (text.isdigit() and len(text) == 10):
-        number = text.replace("+91", "").replace("+", "")
+
+    # UPI IDs (simple check: contains exactly one '@')
+    if "@" in clean_text and len(clean_text.split("@")) == 2:
+        return await handle_lookup(update, context, "upi", clean_text)
+
+    # Pakistan numbers
+    if (clean_text.startswith("+92") and len(clean_text) == 12) or \
+       (clean_text.isdigit() and len(clean_text) == 12 and clean_text.startswith("92")):
+        # Strip +92 if present
+        number = clean_text[3:] if clean_text.startswith("+92") else clean_text
+        return await handle_lookup(update, context, "pakistan", number)
+
+    # Indian numbers
+    if (clean_text.startswith("+91") and len(clean_text) == 13) or \
+       (clean_text.isdigit() and len(clean_text) == 10):
+        # Strip +91 if present
+        number = clean_text[3:] if clean_text.startswith("+91") else clean_text
         return await handle_lookup(update, context, "number", number)
-    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", text):
-        return await handle_lookup(update, context, "ip", text)
-    if text.isdigit() and len(text) == 12:
-        return await handle_lookup(update, context, "aadhar", text)
+
+    # IP address
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", clean_text):
+        return await handle_lookup(update, context, "ip", clean_text)
+
+    # 12-digit Aadhar number
+    if clean_text.isdigit() and len(clean_text) == 12:
+        return await handle_lookup(update, context, "aadhar", clean_text)
 
 
 async def call_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
