@@ -25,7 +25,7 @@ from config import (
     ADMIN_CONTACT,
     BRANDING_FOOTER,
     CHANNEL_LINK_1,
-    CHANNEL_LINK_2,
+    GROUP_LINK_2,
     MIN_DIAMOND_PURCHASE,
     OWNER_ID,
     REFERRAL_REWARD_DIAMOND,
@@ -96,7 +96,7 @@ def footer_buttons(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK_1),
-            InlineKeyboardButton("🆘 Support", url=CHANNEL_LINK_2),
+            InlineKeyboardButton("🆘 Support", url=GROUP_LINK_2),
         ],
     ]
     if add_to_group_url:
@@ -217,7 +217,7 @@ async def enforce_membership(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             keyboard = [
                 [InlineKeyboardButton("Join Updates", url=CHANNEL_LINK_1)],
-                [InlineKeyboardButton("Join Support", url=CHANNEL_LINK_2)],
+                [InlineKeyboardButton("Join Support", url=GROUP_LINK_2)],
                 [InlineKeyboardButton("Verify Membership", callback_data=f"verify_membership_{user.id}")],
             ]
             await safe_send(
