@@ -33,7 +33,6 @@ class Database:
                 daily_search_count INTEGER DEFAULT 0,
                 vhowner_daily_count INTEGER DEFAULT 0,
                 last_search_date TEXT,
-                last_verify_time TEXT,
                 joined_date TEXT,
                 last_active TEXT
             )
@@ -106,7 +105,6 @@ class Database:
         self._ensure_column(cursor, "users", "daily_search_count", "INTEGER DEFAULT 0")
         self._ensure_column(cursor, "users", "vhowner_daily_count", "INTEGER DEFAULT 0")
         self._ensure_column(cursor, "users", "last_search_date", "TEXT")
-        self._ensure_column(cursor, "users", "last_verify_time", "TEXT")
 
         self._ensure_redeem_columns(cursor)
 
@@ -178,28 +176,6 @@ class Database:
             user["vhowner_daily_count"] = 0
             user["last_search_date"] = today
         return user
-
-    def can_verify_now(self, user_id: int) -> bool:
-        user = self.get_user(user_id)
-        if not user:
-            return True  # Allow if user not found, but should be registered
-        last_verify = user.get("last_verify_time")
-        if not last_verify:
-            return True
-        try:
-            last_time = datetime.fromisoformat(last_verify)
-            now = datetime.now()
-            diff = (now - last_time).total_seconds()
-            return diff >= 30
-        except ValueError:
-            return True
-
-    def update_last_verify_time(self, user_id: int):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET last_verify_time = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
-        conn.commit()
-        conn.close()
 
     def update_last_active(self, user_id: int):
         conn = self.get_connection()

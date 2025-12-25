@@ -63,6 +63,27 @@ def is_sudo(user_id: int) -> bool:
 def is_admin(user_id: int) -> bool:
     return is_owner(user_id) or is_sudo(user_id)
 
+
+def safe_has_logged_start(user_id: int) -> bool:
+    """
+    Backward compatible helper: some older deployments may miss has_logged_start on Database.
+    """
+    checker = getattr(db, "has_logged_start", None)
+    if callable(checker):
+        return checker(user_id)
+    return False
+
+
+def safe_ensure_daily_counter(user_id: int) -> dict:
+    """
+    Backward compatible helper: falls back to get_user when ensure_daily_counter is absent.
+    """
+    ensure = getattr(db, "ensure_daily_counter", None)
+    if callable(ensure):
+        return ensure(user_id)
+    return db.get_user(user_id) or {}
+
+
 def queue_autodelete(message, context: ContextTypes.DEFAULT_TYPE, delay: int = 300):
     if not message:
         return
@@ -121,7 +142,7 @@ async def referral_button(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> I
 
 
 def format_home_text(user, user_data, referral_link: str) -> str:
-    daily_user = db.ensure_daily_counter(user.id)
+    daily_user = safe_ensure_daily_counter(user.id)
     daily_used = daily_user.get("daily_search_count", 0) if daily_user else 0
     free_left = max(0, DAILY_FREE_GROUP_LIMIT - daily_used)
     return (
@@ -209,34 +230,27 @@ async def enforce_membership(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     if not user:
         return False
-
-    missing_channels = []
-
     for channel in REQUIRED_CHANNELS:
         try:
             member = await context.bot.get_chat_member(channel["id"], user.id)
             if member.status in ["left", "kicked"]:
-                missing_channels.append(channel)
-        except Exception as e:
-            logger.warning(f"Membership check failed for {user.id} in {channel['id']}: {e}")
-            missing_channels.append(channel)
-
-    if missing_channels:
-        keyboard = [
-            [InlineKeyboardButton("Join Updates", url=CHANNEL_LINK_1)],
-            [InlineKeyboardButton("Join Support", url=CHANNEL_LINK_2)],
-            [InlineKeyboardButton("Verify Membership", callback_data=f"verify_membership_{user.id}")],
-        ]
-        await safe_send(
-            update,
-            context,
-            "Access restricted. Join both channels first, then tap Verify.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            autodelete=False,
-        )
-        return False
-
+                raise ValueError("not joined")
+        except Exception:
+            keyboard = [
+                [InlineKeyboardButton("Join Updates", url=CHANNEL_LINK_1)],
+                [InlineKeyboardButton("Join Support", url=CHANNEL_LINK_2)],
+                [InlineKeyboardButton("Verify Membership", callback_data=f"verify_membership_{user.id}")],
+            ]
+            await safe_send(
+                update,
+                context,
+                "Access restricted. Join both channels first, then tap Verify.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                autodelete=False,
+            )
+            return False
     return True
+
 
 # Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,14 +275,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.update_last_active(user.id)
 
     if referrer_id:
-        if not db.has_logged_start(user.id):
+        if not safe_has_logged_start(user.id):
             await log_to_channel(
                 context,
                 START_LOG_CHANNEL,
                 f"🚀 New user via referral\nName: {escape(user.first_name)}\nID: {user.id}\nReferrer: {referrer_id}",
             )
     else:
-        if not db.has_logged_start(user.id):
+        if not safe_has_logged_start(user.id):
             await log_to_channel(
                 context,
                 START_LOG_CHANNEL,
@@ -295,15 +309,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 <b>Lookups (free in groups)</b>\n"
         "• /num [number] - Number info\n"
         "• /upi [upi_id] - UPI info\n"
-        "• /verify [upi_id] - Verify UPI (30s rate limit)\n"
+        "• /pan [pan] - PAN info\n"
         "• /ip [ip] - IP info\n"
         "• /pak [number] - Pakistan info\n"
         "• /aadhar [number] - Aadhar info\n"
         "• /aadhar2fam [number] - Aadhar family\n"
-        "• /tg [username] - Telegram stats\n"
-        "• /tguser [username] - Telegram (alt)\n"
-        "• /vehicle [plate] - Vehicle basic\n"
-        "• /vhowner [reg] - Vehicle owner mobile (10💎, 5/day + referrals)\n"
         "• /rcpdf [plate] - Vehicle RC PDF (5💎 in DM)\n"
         "• /callhis - Call history buy info\n\n"
         "• /iginfo [user] - Instagram profile\n"
@@ -336,7 +346,7 @@ async def credits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
-    user_data = db.ensure_daily_counter(user.id)
+    user_data = safe_ensure_daily_counter(user.id)
     if not user_data:
         await safe_send(update, context, "Use /start first.")
         return
@@ -430,16 +440,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔍 <b>Lookups (free in groups)</b>\n"
             "• /num [number]\n"
             "• /upi [upi_id]\n"
-            "• /verify [upi_id] - 30s rate limit\n"
             "• /pan [pan]\n"
             "• /ip [ip]\n"
             "• /pak [number]\n"
             "• /aadhar [number]\n"
             "• /aadhar2fam [number]\n"
-            "• /tg [username]\n"
-            "• /tguser [username]\n"
-            "• /vehicle [plate]\n"
-            "• /vhowner [reg] - 10💎 (5/day + referrals)\n"
             "• /rcpdf [plate] - 5💎 in DM\n"
             "• /iginfo [user]\n"
             "• /igposts [user]\n"
@@ -460,15 +465,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔍 <b>Lookups (free in groups)</b>\n"
             "• /num [number] - Number info\n"
             "• /upi [upi_id] - UPI info\n"
-            "• /verify [upi_id] - Verify UPI (30s rate limit)\n"
             "• /pan [pan] - PAN info\n"
             "• /ip [ip] - IP info\n"
             "• /pak [number] - Pakistan info\n"
             "• /aadhar [number] - Aadhar info\n"
             "• /aadhar2fam [number] - Aadhar family\n"
-            "• /tg [username] - Telegram stats\n"
-            "• /vehicle [plate] - Vehicle basic\n"
-            "• /vhowner [reg] - Vehicle owner mobile (10💎, 5/day + referrals)\n"
             "• /rcpdf [plate] - Vehicle RC PDF (5💎 in DM)\n"
             "• /callhis - Call history buy info\n\n"
             "DM lookups are restricted to admins/sudo. Everyone can search freely in groups."
@@ -644,11 +645,15 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
         return await safe_send(update, context, "You are banned from using this bot.")
 
     if chat_type == "private" and not is_admin(user_id):
-        return await safe_send(update, context, "Searches are disabled in DM. Use @DataTraceOSINTSupport group.")
+        return await safe_send(
+            update,
+            context,
+            f"Searches are disabled in DM. Use the support group: {CHANNEL_LINK_2}",
+        )
 
     # Group quota handling (non-admin)
     if chat_type != "private" and not is_admin(user_id):
-        user_data = db.ensure_daily_counter(user_id)
+        user_data = safe_ensure_daily_counter(user_id)
         daily_used = user_data.get("daily_search_count", 0) if user_data else 0
         credits = user_data.get("credits", 0) if user_data else 0
         if daily_used >= DAILY_FREE_GROUP_LIMIT:
@@ -676,48 +681,13 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
     else:
         new_daily_count = None
 
-    # Vhowner specific limit
-    if lookup_type == "vhowner" and not is_admin(user_id):
-        user_data = db.ensure_daily_counter(user_id)
-        vhowner_used = user_data.get("vhowner_daily_count", 0) if user_data else 0
-        referred_count = user_data.get("referred_count", 0) if user_data else 0
-        allowed = 5 + referred_count
-        if vhowner_used >= allowed:
-            ref_markup = await referral_button(context, user_id)
-            return await safe_send(
-                update,
-                context,
-                f"Vhowner daily limit reached ({allowed}).\nRefer friends to unlock more searches.\nUse /refer for details.",
-                reply_markup=ref_markup,
-                autodelete=False,
-            )
-        # increment vhowner counter
-        conn = db.get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE users SET vhowner_daily_count = vhowner_daily_count + 1 WHERE user_id = ?",
-            (user_id,),
-        )
-        conn.commit()
-        conn.close()
-
     if db.is_blacklisted(query):
         return await safe_send(update, context, "This query is blacklisted.")
     if db.is_protected(query) and not is_owner(user_id):
         return await safe_send(update, context, "This number is protected.")
 
-    # Rate limiting for verify
-    if lookup_type == "verify":
-        if not db.can_verify_now(user_id):
-            return await safe_send(update, context, "Rate limit exceeded. You can verify again in 30 seconds.")
-
     # Charging logic
-    if is_admin(user_id):
-        charge = 0
-    elif lookup_type == "vehicle_adv":
-        charge = cost_diamonds
-    else:
-        charge = cost_diamonds if chat_type == "private" else 0
+    charge = 0 if is_admin(user_id) else (cost_diamonds if chat_type == "private" else 0)
 
     if charge:
         user_data = db.get_user(user_id)
@@ -731,15 +701,7 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
             )
         db.update_diamonds(user_id, charge, "deduct")
 
-    if lookup_type == "verify":
-        msg = await safe_send(update, context, "searching all databases ...")
-        await asyncio.sleep(1)
-        await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="connecting to server ...")
-        await asyncio.sleep(1)
-        await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="fetching details")
-        await asyncio.sleep(1)
-    else:
-        await safe_send(update, context, "🔍 Searching...", autodelete=False)
+    await safe_send(update, context, "🔍 Searching...", autodelete=False)
 
     db.log_search(user_id, lookup_type, query)
     await log_to_channel(
@@ -753,18 +715,14 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
     try:
         if lookup_type == "upi":
             result = await api_handler.fetch_upi_info(query)
-        elif lookup_type == "verify":
-            result = await api_handler.fetch_verify_upi(query)
         elif lookup_type == "pan":
             result = await api_handler.fetch_pan_info(query)
         elif lookup_type == "number":
             result = await api_handler.fetch_number_info(query)
+        elif lookup_type == "number_alt":
+            result = await api_handler.fetch_number_alt_info(query)
         elif lookup_type == "ip":
             result = await api_handler.fetch_ip_info(query)
-        elif lookup_type == "telegram":
-            result = await api_handler.fetch_telegram_info(query)
-        elif lookup_type == "telegram_alt":
-            result = await api_handler.fetch_telegram_alt(query)
         elif lookup_type == "pakistan":
             result = await api_handler.fetch_pakistan_info(query)
         elif lookup_type == "aadhar":
@@ -777,12 +735,6 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
             result = await api_handler.fetch_instagram_posts(query)
         elif lookup_type == "bank_ifsc":
             result = await api_handler.fetch_ifsc_info(query)
-        elif lookup_type == "vehicle_basic":
-            result = await api_handler.fetch_vehicle_basic(query)
-        elif lookup_type == "vehicle_adv":
-            result = await api_handler.fetch_vehicle_advanced(query)
-        elif lookup_type == "vhowner":
-            result = await api_handler.fetch_vhowner(query)
         elif lookup_type == "vehicle_rc_pdf":
             file_path = await api_handler.fetch_vehicle_rc_pdf(query)
     except Exception as exc:
@@ -805,9 +757,6 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
         return
 
     try:
-        if lookup_type == "verify":
-            await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
-
         # strip text footer, add button footer
         if isinstance(result, str) and BRANDING_FOOTER in result:
             result = result.replace(BRANDING_FOOTER, "").strip()
@@ -824,10 +773,6 @@ async def handle_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE, look
                 pass
         else:
             await safe_send(update, context, result, reply_markup=footer_buttons(context))
-
-        # Update last verify time for verify type
-        if lookup_type == "verify":
-            db.update_last_verify_time(user_id)
 
         # Refer prompt every 3 searches (group, non-admin)
         if new_daily_count and new_daily_count % 3 == 0 and chat_type != "private" and not is_admin(user_id):
@@ -851,16 +796,16 @@ async def num_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_lookup(update, context, "number", "".join(context.args))
 
 
+async def num2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await safe_send(update, context, "Usage: /num2 [number]")
+    await handle_lookup(update, context, "number_alt", "".join(context.args))
+
+
 async def upi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await safe_send(update, context, "Usage: /upi [upi_id]")
     await handle_lookup(update, context, "upi", context.args[0])
-
-
-async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await safe_send(update, context, "Usage: /verify [upi_id]")
-    await handle_lookup(update, context, "verify", context.args[0])
 
 
 async def pan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -873,12 +818,6 @@ async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await safe_send(update, context, "Usage: /ip [ip_address]")
     await handle_lookup(update, context, "ip", context.args[0])
-
-
-async def tg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await safe_send(update, context, "Usage: /tg [username]")
-    await handle_lookup(update, context, "telegram", context.args[0].replace("@", ""))
 
 
 async def pak_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -899,18 +838,6 @@ async def aadhar2fam_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await handle_lookup(update, context, "aadhar_family", "".join(context.args))
 
 
-async def vehicle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await safe_send(update, context, "Usage: /vehicle [plate]")
-    await handle_lookup(update, context, "vehicle_basic", "".join(context.args))
-
-
-async def vhowner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await safe_send(update, context, "Usage: /vhowner [registration_number]")
-    await handle_lookup(update, context, "vhowner", "".join(context.args), cost_diamonds=10)
-
-
 async def vehicle_rc_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await safe_send(update, context, "Usage: /rcpdf [plate]")
@@ -928,12 +855,6 @@ async def igposts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.args[0].lstrip("@")
     await handle_lookup(update, context, "insta_posts", username)
 
-async def tguser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await safe_send(update, context, "Usage: /tguser [username]")
-    username = context.args[0].lstrip("@")
-    await handle_lookup(update, context, "telegram_alt", username)
-
 async def ifsc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await safe_send(update, context, "Usage: /ifsc [code]")
@@ -943,59 +864,28 @@ async def ifsc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Direct input handler
 async def handle_direct_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle messages that are not commands. Auto-detects:
-    - Indian numbers (+91 or 10-digit)
-    - Pakistan numbers (+92 or 12-digit starting with 92)
-    - UPI IDs
-    - IP addresses
-    - 12-digit Aadhar numbers
-    """
     if not getattr(update, "message", None) or not update.message.text:
         return
-
     text = update.message.text.strip()
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-
-    # If message comes from a group, only process if bot is mentioned
     if chat_type != "private":
         bot_username = (await context.bot.get_me()).username
         if f"@{bot_username}" not in text and not text.startswith("/"):
             return
         text = text.replace(f"@{bot_username}", "").strip()
-
-    # Clean input
-    clean_text = text.replace(" ", "").replace("-", "")
-
-    # Skip commands
-    if clean_text.startswith("/"):
+    if text.startswith("/"):
         return
-
-    # UPI IDs (simple check: contains exactly one '@')
-    if "@" in clean_text and len(clean_text.split("@")) == 2:
-        return await handle_lookup(update, context, "upi", clean_text)
-
-    # Pakistan numbers
-    if (clean_text.startswith("+92") and len(clean_text) == 12) or \
-       (clean_text.isdigit() and len(clean_text) == 12 and clean_text.startswith("92")):
-        # Strip +92 if present
-        number = clean_text[3:] if clean_text.startswith("+92") else clean_text
-        return await handle_lookup(update, context, "pakistan", number)
-
-    # Indian numbers
-    if (clean_text.startswith("+91") and len(clean_text) == 13) or \
-       (clean_text.isdigit() and len(clean_text) == 10):
-        # Strip +91 if present
-        number = clean_text[3:] if clean_text.startswith("+91") else clean_text
+    if "@" in text and len(text.split("@")) == 2:
+        return await handle_lookup(update, context, "upi", text)
+    if text.startswith("+92") or (text.isdigit() and len(text) == 12 and text.startswith("92")):
+        return await handle_lookup(update, context, "pakistan", text)
+    if text.startswith("+91") or (text.isdigit() and len(text) == 10):
+        number = text.replace("+91", "").replace("+", "")
         return await handle_lookup(update, context, "number", number)
-
-    # IP address
-    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", clean_text):
-        return await handle_lookup(update, context, "ip", clean_text)
-
-    # 12-digit Aadhar number
-    if clean_text.isdigit() and len(clean_text) == 12:
-        return await handle_lookup(update, context, "aadhar", clean_text)
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", text):
+        return await handle_lookup(update, context, "ip", text)
+    if text.isdigit() and len(text) == 12:
+        return await handle_lookup(update, context, "aadhar", text)
 
 
 async def call_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1046,17 +936,13 @@ def main():
     application.add_handler(CommandHandler("createcode", create_code_command))
 
     application.add_handler(CommandHandler("num", num_command))
+    application.add_handler(CommandHandler("num2", num2_command))
     application.add_handler(CommandHandler("upi", upi_command))
-    application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(CommandHandler("pan", pan_command))
     application.add_handler(CommandHandler("ip", ip_command))
-    application.add_handler(CommandHandler("tg", tg_command))
-    application.add_handler(CommandHandler("tguser", tguser_command))
     application.add_handler(CommandHandler("pak", pak_command))
     application.add_handler(CommandHandler("aadhar", aadhar_command))
     application.add_handler(CommandHandler("aadhar2fam", aadhar2fam_command))
-    application.add_handler(CommandHandler("vehicle", vehicle_command))
-    application.add_handler(CommandHandler("vhowner", vhowner_command))
     application.add_handler(CommandHandler("rcpdf", vehicle_rc_pdf_command))
     application.add_handler(CommandHandler("iginfo", iginfo_command))
     application.add_handler(CommandHandler("igposts", igposts_command))

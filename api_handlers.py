@@ -98,17 +98,6 @@ class APIHandler:
             return INFO_NOT_FOUND
         return self._format_upi(data, upi_id)
 
-    async def fetch_verify_upi(self, upi_id: str) -> str:
-        """Fetch and format verified UPI information with custom messages."""
-        if not upi_id:
-            return "no result found for your query"
-
-        url = API_ENDPOINTS["verify"].format(query=upi_id)
-        data = await self._fetch_data(url)
-        if not data:
-            return "no result found for your query"
-        return self._format_verify(data)
-
     async def fetch_pan_info(self, pan: str) -> str:
         """Fetch and format PAN information."""
         if not pan:
@@ -156,35 +145,6 @@ class APIHandler:
         lines.append(BRANDING_FOOTER)
         return '\n'.join(lines)
 
-    def _format_verify(self, data: Dict[str, Any]) -> str:
-        """Format verify data into a string."""
-        entries = data.get("data", {}).get("verify_chumts", [])
-        if not entries or not isinstance(entries, list):
-            return "no result found for your query"
-
-        lines = [
-            "━━━━━━━━━━━━━━━━━━━",
-            "🔍 VERIFY UPI RESULT",
-            "━━━━━━━━━━━━━━━━━━━",
-            "",
-        ]
-        for idx, entry in enumerate(entries, 1):
-            if not isinstance(entry, dict):
-                continue
-            lines.extend([
-                f"📱 ENTRY {idx}",
-                f"📛 NAME: {entry.get('name', NA)}",
-                f"💳 VPA: {entry.get('vpa', NA)}",
-                f"🏦 IFSC: {entry.get('ifsc', NA)}",
-                f"💳 ACC NO: {entry.get('acc_no', NA)}",
-                f"📞 UPI NUMBER: {entry.get('upi_number', NA)}",
-                f"🏪 MERCHANT: {entry.get('is_merchant', False)}",
-                f"✅ VERIFIED: {entry.get('is_merchant_verified', False)}",
-                "",
-            ])
-        lines.append(BRANDING_FOOTER)
-        return "\n".join(lines)
-
     def _format_pan(self, data: Dict[str, Any], pan: str) -> str:
         """Format PAN data into a string."""
         if not isinstance(data, dict) or not data.get("success"):
@@ -212,75 +172,239 @@ class APIHandler:
             return "No number provided."
 
         # Block specific numbers
-        if number in ["7000996857", "7724814462"]:
+        if number in ["9690060158", "9307520837"]:
             return "NO INFORMATION FOUND FOR THIS NUMBER"
 
-        url = API_ENDPOINTS["number"].format(mob_number=number, number=number)
+        url = API_ENDPOINTS["number"].format(
+            mob_number=number,
+            number=number,
+            key=API_KEYS.get("number", ""),
+        )
         data = await self._fetch_data(url)
         if not data:
             return "Number lookup failed."
         return self._format_number(data)
 
-    def _format_number(self, data: Any) -> str:
-        """Format number data into a string."""
+    async def fetch_number_alt_info(self, number: str) -> str:
+        """Fetch and format alternate number information."""
+        if not number:
+            return "No number provided."
+
+        if number in ["9690060158", "9307520837"]:
+            return "NO INFORMATION FOUND FOR THIS NUMBER"
+
+        endpoint = API_ENDPOINTS.get("number_alt") or API_ENDPOINTS["number"]
+        url = endpoint.format(
+            mob_number=number,
+            number=number,
+            key=API_KEYS.get("number", ""),
+        )
+        data = await self._fetch_data(url)
+        if not data:
+            return "Number lookup failed."
+        return self._format_number_alternate(data, fallback_number=number)
+
+    def _clean_address(self, raw: Any) -> str:
+        """Normalize address separators."""
+        if not raw:
+            return NA
+        cleaned = str(raw).replace("!!", ", ").replace("!", ", ").strip()
+        cleaned = cleaned.replace(" ,", ", ")
+        return cleaned or NA
+
+    def _extract_number_entries(self, data: Any) -> List[Dict[str, Any]]:
+        """Extract number entries from multiple possible payload shapes."""
         entries: List[Dict[str, Any]] = []
         if isinstance(data, dict):
-            # Handle nested data.result structure
-            if "data" in data and isinstance(data["data"], dict) and "result" in data["data"]:
-                entries = data["data"]["result"]
-            else:
-                entries = (
-                    data.get("data")
-                    or data.get("result")
-                    or data.get("results")
-                    or data.get("records")
-                    or data.get("record")
-                    or []
-                )
-            # If still empty, try to locate the first list of dicts inside the payload
+            main_api = data.get("main_api")
+            if isinstance(main_api, dict):
+                nested = main_api.get("data")
+                if isinstance(nested, list):
+                    entries = [entry for entry in nested if isinstance(entry, dict)]
+            elif isinstance(main_api, list):
+                entries = [entry for entry in main_api if isinstance(entry, dict)]
+
+            if not entries:
+                nested_data = data.get("data")
+                if isinstance(nested_data, dict) and isinstance(nested_data.get("result"), list):
+                    entries = [entry for entry in nested_data.get("result", []) if isinstance(entry, dict)]
+                elif isinstance(nested_data, list):
+                    entries = [entry for entry in nested_data if isinstance(entry, dict)]
+
+            if not entries:
+                for key in ("result", "results", "records", "record"):
+                    if isinstance(data.get(key), list):
+                        entries = [entry for entry in data.get(key, []) if isinstance(entry, dict)]
+                        break
+
             if not entries:
                 for value in data.values():
                     if isinstance(value, list) and value and isinstance(value[0], dict):
-                        entries = value
+                        entries = [entry for entry in value if isinstance(entry, dict)]
                         break
-            # If a single dict with name/mobile, treat it as one entry
+
             if not entries and all(k in data for k in ("name", "mobile")):
                 entries = [data]
         elif isinstance(data, list):
             entries = [d for d in data if isinstance(d, dict)]
+        return entries
 
-        if not entries or not isinstance(entries, list):
+
+
+    def _format_number(self, data: Any) -> str:
+        """Format number data into a string."""
+        entries = self._extract_number_entries(data)
+        if not entries:
             return INFO_NOT_FOUND
 
-        lines = [
-            "━━━━━━━━━━━━━━━━━━━",
-            "🔍 NUMBER TO INFO RESULT",
-            "━━━━━━━━━━━━━━━━━━━",
-            "",
-        ]
+        lines = ["\U0001F4F1 Number Info", "\u2501" * 14]
+        any_rows = False
         for idx, entry in enumerate(entries, 1):
             if not isinstance(entry, dict):
                 continue
-            address = (entry.get("address") or "").replace("!", ", ").strip() or NA
-            email = entry.get("email") or NA
-            if email == "":
+            name = entry.get("name") or entry.get("Name") or NA
+            fname = (
+                entry.get("fname")
+                or entry.get("father_name")
+                or entry.get("parent_name")
+                or entry.get("husband_name")
+                or NA
+            )
+            mobile = entry.get("mobile") or entry.get("phone") or NA
+            alt_mobile = (
+                entry.get("alt")
+                or entry.get("alt_mobile")
+                or entry.get("alternate_number")
+                or entry.get("altNumber")
+                or NA
+            )
+            circle = entry.get("circle") or entry.get("Circle") or NA
+            id_value = entry.get("id_number") or entry.get("id") or entry.get("document_id") or NA
+            email = entry.get("email") or entry.get("Email") or NA
+            if not email:
                 email = NA
-            id_value = entry.get("id_number") or entry.get("id") or NA
+            address = self._clean_address(entry.get("address"))
             lines.extend([
-                f"📱 ENTRY {idx}",
-                f"📛 NAME: {entry.get('name', NA)}",
-                f"👨‍👦 FATHER NAME: {entry.get('father_name', NA)}",
-                f"📞 MOBILE: {entry.get('mobile', NA)}",
-                f"🏠 ADDRESS: {address}",
-                f"📡 CIRCLE: {entry.get('circle', NA)}",
-                f"🆔 ID: {id_value}",
-                f"📧 EMAIL: {email}",
+                f"#{idx} - {name if name != NA else 'Entry'}",
+                f"\U0001F464 Name: {name}",
+                f"\U0001F9D4 Father/Spouse: {fname}",
+                f"\U0001F4DE Mobile: {mobile}",
+                f"\U0001F4F2 Alt Mobile: {alt_mobile}",
+                f"\U0001F4CD Circle: {circle}",
+                f"\U0001F194 ID: {id_value}",
+                f"\U0001F3E0 Address: {address}",
+                f"\u2709\ufe0f Email: {email}",
                 "",
             ])
+            any_rows = True
+        if not any_rows:
+            return INFO_NOT_FOUND
         lines.append(BRANDING_FOOTER)
         return "\n".join(lines)
 
-    # ---- Aadhar ----
+
+    def _format_number_alternate(self, data: Any, fallback_number: str = NA) -> str:
+        """Format alternate number data into a string."""
+        alt_data: Dict[str, Any] = {}
+        if isinstance(data, dict):
+            alt_data = data.get("alternate_api") or data.get("alternate") or {}
+        if not isinstance(alt_data, dict):
+            alt_data = {}
+
+        alt_data = {k: v for k, v in alt_data.items() if str(k).lower() != "developer"}
+
+        main_entries: List[Dict[str, Any]] = []
+        if isinstance(data, dict):
+            main_entries = self._extract_number_entries(data.get("main_api") or {})
+            if not main_entries:
+                main_entries = self._extract_number_entries(data)
+
+        if not alt_data and not main_entries:
+            return INFO_NOT_FOUND
+
+        ordered_keys = [
+            "Complaints",
+            "Owner Name",
+            "SIM card",
+            "Mobile State",
+            "Mobile City",
+            "Connection",
+            "Refrence Area",
+            "Refrence City",
+            "Owner Personality",
+            "Language",
+            "Mobile Locations",
+            "Country",
+            "Tracking History",
+            "Tracker Id",
+            "Tower Locations",
+            "Helpline",
+        ]
+        emoji_map = {
+            "Complaints": "\u26a0\ufe0f",
+            "Owner Name": "\U0001F9CD",
+            "SIM card": "\U0001F4F6",
+            "Mobile State": "\U0001F5FA",
+            "Mobile City": "\U0001F307",
+            "Connection": "\U0001F50C",
+            "Refrence City": "\U0001F4CD",
+            "Refrence Area": "\U0001F4CD",
+            "Owner Personality": "\U0001F9E0",
+            "Language": "\U0001F5E3",
+            "Mobile Locations": "\U0001F9ED",
+            "Country": "\U0001F30D",
+            "Tracking History": "\U0001F463",
+            "Tracker Id": "\U0001F194",
+            "Tower Locations": "\U0001F4E1",
+            "Helpline": "\U0001F198",
+        }
+
+        lines = [
+            "\U0001F4DE Alternate Number Info",
+            "\u2501" * 18,
+        ]
+        number_value = alt_data.get("Number") or (data.get("number") if isinstance(data, dict) else None) or fallback_number or NA
+        lines.append(f"\u260e\ufe0f Number: {number_value}")
+
+        if main_entries:
+            lines.append("")
+            lines.append("\U0001F539 Primary Data")
+            for idx, entry in enumerate(main_entries, 1):
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("Name") or NA
+                fname = entry.get("fname") or entry.get("father_name") or entry.get("parent_name") or entry.get("husband_name") or NA
+                mobile = entry.get("mobile") or entry.get("phone") or number_value
+                alt_mobile = entry.get("alt") or entry.get("alt_mobile") or entry.get("alternate_number") or entry.get("altNumber") or NA
+                circle = entry.get("circle") or entry.get("Circle") or NA
+                address = self._clean_address(entry.get("address"))
+                lines.extend([
+                    f"[#{idx}] {name if name != NA else 'Detail'}",
+                    f"\U0001F464 Name: {name}",
+                    f"\U0001F9D4 Father/Spouse: {fname}",
+                    f"\U0001F4DE Mobile: {mobile}",
+                    f"\U0001F4F2 Alt Mobile: {alt_mobile}",
+                    f"\U0001F4CD Circle: {circle}",
+                    f"\U0001F3E0 Address: {address}",
+                    "",
+                ])
+
+        if alt_data:
+            lines.append("\u2139\ufe0f Caller Insights")
+            for key in ordered_keys:
+                if key in alt_data:
+                    prefix = emoji_map.get(key, "\u2022")
+                    lines.append(f"{prefix} {key}: {alt_data.get(key) or NA}")
+
+            for key, value in alt_data.items():
+                if key in ordered_keys:
+                    continue
+                lines.append(f"\u2022 {key}: {value or NA}")
+
+        lines.append(BRANDING_FOOTER)
+        return "\n".join(lines)
+
+# ---- Aadhar ----
     async def fetch_aadhar_info(self, aadhar: str) -> str:
         """Fetch and format Aadhar information."""
         if not aadhar:
@@ -303,23 +427,27 @@ class APIHandler:
         if not entries:
             return "⚠️ No information found for this Aadhar."
 
-        lines = ["╔════════ AADHAR INFO ════════╗", ""]
+        lines = ["╔════════ AADHAR INFO ════════╗"]
+        any_rows = False
         for idx, entry in enumerate(entries, 1):
             if not isinstance(entry, dict):
                 continue
             address = (entry.get("address") or "").replace("!", ", ").strip() or NA
             alt_mobile = entry.get("alt") or entry.get("alt_mobile") or NA
             lines.extend([
-                f"[Entry #{idx}]",
-                f"Name: {entry.get('name', NA)}",
-                f"Father: {entry.get('fname') or entry.get('father_name', NA)}",
-                f"Mobile: {entry.get('mobile', NA)}",
-                f"Alt Mobile: {alt_mobile}",
-                f"Address: {address}",
-                f"Circle: {entry.get('circle', NA)}",
-                f"ID: {entry.get('id', NA)}",
+                f"• Entry #{idx}",
+                f"👤 Name: {entry.get('name', NA)}",
+                f"👪 Father: {entry.get('fname') or entry.get('father_name', NA)}",
+                f"📞 Mobile: {entry.get('mobile', NA)}",
+                f"☎️ Alt Mobile: {alt_mobile}",
+                f"🛰 Circle: {entry.get('circle', NA)}",
+                f"🆔 ID: {entry.get('id', NA)}",
+                f"🏠 Address: {address}",
                 "",
             ])
+            any_rows = True
+        if not any_rows:
+            return "⚠️ No information found for this Aadhar."
         lines.append(BRANDING_FOOTER)
         return "\n".join(lines)
 
@@ -422,95 +550,6 @@ class APIHandler:
         if not text:
             return INFO_NOT_FOUND
         return "\n".join(["🌐 IP Info", "━━━━━━━━━━━━", text.strip(), BRANDING_FOOTER])
-
-    # ---- Telegram ----
-    async def fetch_telegram_info(self, username: str) -> str:
-        """Fetch and format Telegram user information."""
-        if not username:
-            return INFO_NOT_FOUND
-
-        url = f"{API_ENDPOINTS['telegram']}?user={username}"
-        data = await self._fetch_data(url)
-        if not data:
-            return INFO_NOT_FOUND
-        return self._format_telegram(data)
-
-    def _format_telegram(self, data: Dict[str, Any]) -> str:
-        """Format Telegram data into a string."""
-        user_data = data.get("data", data) if isinstance(data, dict) else data
-        if not user_data:
-            return "⚠️ Information not found."
-
-        lines = [
-            "╔════════ TELEGRAM STATS ════════╗",
-            "━━━━━━━━━━━━",
-            f"Name: {user_data.get('first_name', NA)} {user_data.get('last_name', '')}".strip(),
-            f"User ID: {user_data.get('id', user_data.get('user_id', NA))}",
-            f"Is Bot: {user_data.get('is_bot', False)}",
-            f"Active: {user_data.get('is_active', False)}",
-            "",
-            "[Stats]",
-            f"Total Groups: {user_data.get('total_groups', 0)}",
-            f"Admin In Groups: {user_data.get('adm_in_groups', 0)}",
-            f"Total Messages: {user_data.get('total_msg_count', 0)}",
-            f"Messages In Groups: {user_data.get('msg_in_groups_count', 0)}",
-            f"First Msg: {user_data.get('first_msg_date', NA)}",
-            f"Last Msg: {user_data.get('last_msg_date', NA)}",
-            BRANDING_FOOTER,
-        ]
-        return "\n".join(lines)
-
-    async def fetch_telegram_alt(self, username: str) -> str:
-        """Fetch and format alternative Telegram information."""
-        if not username:
-            return INFO_NOT_FOUND
-
-        url = API_ENDPOINTS["tg_user_alt"].format(username=username)
-        data = await self._fetch_data(url)
-        if not data:
-            return INFO_NOT_FOUND
-        return self._format_telegram_alt(data, username)
-
-    def _format_telegram_alt(self, data: Dict[str, Any], username: str) -> str:
-        """Format alternative Telegram data."""
-        if not isinstance(data, dict):
-            return "⚠️ Information not found."
-        if data.get("success") is False:
-            return "⚠️ Information not found."
-
-        payload = data.get("data") or {}
-        profile = payload.get("profile", {}) if isinstance(payload, dict) else {}
-        contacts = payload.get("contacts", {}) if isinstance(payload, dict) else {}
-        activity = payload.get("activity", {}) if isinstance(payload, dict) else {}
-        media = payload.get("media", {}) if isinstance(payload, dict) else {}
-        photos = media.get("profile_photos", {}) if isinstance(media, dict) else {}
-
-        lines = [
-            "╔════════ TELEGRAM USER ════════╗",
-            f"Username: {data.get('username', username)}",
-            f"Name: {profile.get('name', NA)}",
-            f"Bio: {profile.get('bio', NA)}",
-            f"Verified: {profile.get('verified', False)} | Premium: {profile.get('premium', False)}",
-            "",
-            "[Contacts]",
-            f"Link: {contacts.get('telegram_link', NA)}",
-            f"DM: {contacts.get('direct_message', NA)}",
-            "",
-            "[Activity]",
-            f"Status: {activity.get('online_status', NA)}",
-            f"Last seen: {activity.get('last_seen', NA)}",
-            f"Subscribers: {activity.get('subscribers', NA)}",
-        ]
-
-        if photos.get("profile_picture"):
-            lines.extend([
-                "",
-                f"Profile Pic: {photos.get('profile_picture')}",
-                f"Photo ID: {photos.get('photo_id', NA)}",
-            ])
-
-        lines.append(BRANDING_FOOTER)
-        return "\n".join(lines)
 
     # ---- Pakistan ----
     async def fetch_pakistan_info(self, number: str) -> str:
@@ -649,124 +688,6 @@ class APIHandler:
             f"CITY: {data.get('CITY', NA)} | DISTRICT: {data.get('DISTRICT', NA)} | STATE: {data.get('STATE', NA)}",
             f"ISO: {data.get('ISO3166', NA)}",
             f"NEFT: {data.get('NEFT', False)} | RTGS: {data.get('RTGS', False)} | IMPS: {data.get('IMPS', False)} | UPI: {data.get('UPI', False)}",
-            BRANDING_FOOTER,
-        ]
-        return "\n".join(lines)
-
-    # ---- Vehicle basic ----
-    async def fetch_vehicle_basic(self, plate: str) -> str:
-        """Fetch and format basic vehicle information."""
-        if not plate:
-            return f"⚠️ No plate provided."
-
-        url = API_ENDPOINTS["vehicle_basic"].format(number=plate)
-        data = await self._fetch_data(url, timeout=20)
-        if not data:
-            return f"⚠️ Vehicle lookup failed."
-        return self._format_vehicle_basic(data)
-
-    def _format_vehicle_basic(self, data: Dict[str, Any]) -> str:
-        """Format basic vehicle data."""
-        vehicle = data.get("data") or data.get("response") or data
-        if not isinstance(vehicle, dict) or not vehicle:
-            return "⚠️ No info found for this plate."
-
-        challan = vehicle.get("challan_info") or vehicle
-        puc = vehicle.get("puc_info") or {}
-
-        lines = [
-            "╔════════ VEHICLE INFO ════════╗",
-            f"🪪 Owner: {challan.get('owner_name', vehicle.get('owner_name', vehicle.get('owner', NA)))}",
-            f"🚘 Plate: {challan.get('registration_no', vehicle.get('license_plate', vehicle.get('registration_number', NA)))}",
-            f"🏢 RTO: {challan.get('registration_authority', NA)}",
-            f"🗓 Registered: {challan.get('registration_date', vehicle.get('registration_date', NA))}",
-            f"🚗 Model: {challan.get('maker_model', vehicle.get('brand_model', vehicle.get('model', NA)))}",
-            f"🏷 Brand: {challan.get('brand_name', vehicle.get('brand', NA))}",
-            f"🎨 Color: {challan.get('vehicle_color', vehicle.get('color', NA))}",
-            f"⛽ Fuel: {challan.get('fuel_type', vehicle.get('fuel_type', NA))}",
-            f"📦 Class/Type: {challan.get('vehicle_class', NA)} / {challan.get('vehicle_type', NA)}",
-            f"🛡 RC Status: {challan.get('rc_status', vehicle.get('rc_status', NA))}",
-            f"🔧 Chassis: {challan.get('chassis_no', vehicle.get('chassis_number', NA))}",
-            f"⚙️ Engine: {challan.get('engine_no', vehicle.get('engine_number', NA))}",
-            f"🧾 Insurance: {challan.get('insurance_company', NA)} (till {challan.get('insurance_upto', NA)})",
-            f"♻️ PUC till: {challan.get('puc_upto', puc.get('rc_pucc_upto', NA))}",
-            f"🏋️ Unladen Wt: {challan.get('unload_weight', NA)} | Seats: {challan.get('seat_capacity', NA)}",
-            f"🏠 Address: {vehicle.get('present_address', vehicle.get('address', NA))}",
-            BRANDING_FOOTER,
-        ]
-        return "\n".join(lines)
-
-    # ---- Vehicle advanced ----
-    async def fetch_vehicle_advanced(self, plate: str) -> str:
-        """Fetch and format advanced vehicle information."""
-        if not plate:
-            return f"⚠️ No plate provided."
-
-        url = API_ENDPOINTS["vehicle_adv"].format(number=plate)
-        data = await self._fetch_data(url, timeout=20)
-        if not data:
-            return f"⚠️ Advanced vehicle lookup failed."
-        return self._format_vehicle_advanced(data)
-
-    def _format_vehicle_advanced(self, data: Dict[str, Any]) -> str:
-        """Format advanced vehicle data."""
-        root = data.get("response") or data.get("data") or data
-        vehicle = root.get("data") or root
-        if not isinstance(vehicle, dict) or not vehicle:
-            return "⚠️ No info found for this plate."
-
-        body_desc = vehicle.get("body_type_desc")
-        if isinstance(body_desc, dict):
-            body_desc = ", ".join(f"{k}:{v}" for k, v in body_desc.items())
-
-        lines = [
-            "╔════════ VEHICLE ADV ════════╗",
-            f"🪪 Owner: {vehicle.get('owner_name', NA)}",
-            f"👤 Father: {vehicle.get('father_name', NA)}",
-            f"🚘 Plate: {vehicle.get('registration_no', vehicle.get('license_plate', vehicle.get('vehicle_no', NA)))}",
-            f"🏢 RTO: {vehicle.get('registration_authority', NA)}",
-            f"🗓 Registered: {vehicle.get('registration_date', NA)}",
-            f"🚗 Model: {vehicle.get('maker_model', vehicle.get('brand_model', vehicle.get('model', NA)))}",
-            f"🏷 Brand: {vehicle.get('brand_name', vehicle.get('brand', NA))}",
-            f"📦 Class/Type: {vehicle.get('vehicle_class', vehicle.get('class', NA))} / {vehicle.get('vehicle_type', NA)}",
-            f"⛽ Fuel: {vehicle.get('fuel_type', NA)} | Norms: {vehicle.get('fuel_norms', NA)}",
-            f"🎨 Color: {vehicle.get('vehicle_color', vehicle.get('color', NA))}",
-            f"🏋️ Unladen Wt: {vehicle.get('unload_weight', NA)} | Seats: {vehicle.get('seat_capacity', NA)}",
-            f"🗓 Fitness: {vehicle.get('fitness_upto', NA)} | Insurance: {vehicle.get('insurance_upto', NA)}",
-            f"♻️ PUC till: {vehicle.get('puc_upto', NA)}",
-            f"🔧 Chassis: {vehicle.get('chassis_no', vehicle.get('chassis_number', NA))}",
-            f"⚙️ Engine: {vehicle.get('engine_no', vehicle.get('engine_number', NA))}",
-            f"🏗 Body: {body_desc or NA}",
-            f"📄 RC Status: {vehicle.get('rc_status', NA)} | Ownership: {vehicle.get('ownership_desc', NA)}",
-            f"📞 Mobile: {root.get('mobile_no', NA)}",
-            BRANDING_FOOTER,
-        ]
-        return "\n".join(lines)
-
-    # ---- Vehicle owner ----
-    async def fetch_vhowner(self, reg: str) -> str:
-        """Fetch and format vehicle owner information."""
-        if not reg:
-            return f"⚠️ No registration number provided."
-
-        url = API_ENDPOINTS["vhowner"].format(reg=reg)
-        data = await self._fetch_data(url, timeout=20)
-        if not data:
-            return f"⚠️ Vehicle owner lookup failed."
-        return self._format_vhowner(data)
-
-    def _format_vhowner(self, data: Dict[str, Any]) -> str:
-        """Format vehicle owner data."""
-        if not data.get("success"):
-            return "⚠️ No info found for this registration."
-
-        vehicle_data = data.get("data", {})
-        mobile_no = vehicle_data.get("mobile_no", NA)
-
-        lines = [
-            "╔════════ VEHICLE OWNER ════════╗",
-            f"🚘 Registration: {data.get('reg_no', NA)}",
-            f"📞 Mobile Number: {mobile_no}",
             BRANDING_FOOTER,
         ]
         return "\n".join(lines)
